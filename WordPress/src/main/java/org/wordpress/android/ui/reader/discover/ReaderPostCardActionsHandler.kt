@@ -12,6 +12,7 @@ import org.wordpress.android.R
 import org.wordpress.android.analytics.AnalyticsTracker.Stat.APP_REVIEWS_EVENT_INCREMENTED_BY_OPENING_READER_POST
 import org.wordpress.android.analytics.AnalyticsTracker.Stat.FOLLOWED_BLOG_NOTIFICATIONS_READER_ENABLED
 import org.wordpress.android.analytics.AnalyticsTracker.Stat.READER_ARTICLE_VISITED
+import org.wordpress.android.analytics.AnalyticsTracker.Stat.READER_POST_REPORTED
 import org.wordpress.android.analytics.AnalyticsTracker.Stat.READER_SAVED_LIST_SHOWN
 import org.wordpress.android.analytics.AnalyticsTracker.Stat.READER_SAVED_POST_OPENED_FROM_OTHER_POST_LIST
 import org.wordpress.android.analytics.AnalyticsTracker.Stat.SHARED_ITEM_READER
@@ -24,6 +25,7 @@ import org.wordpress.android.modules.DEFAULT_SCOPE
 import org.wordpress.android.modules.UI_SCOPE
 import org.wordpress.android.ui.pages.SnackbarMessageHolder
 import org.wordpress.android.ui.prefs.AppPrefsWrapper
+import org.wordpress.android.ui.reader.discover.ReaderCardUiState.ReaderRecommendedBlogsCardUiState.ReaderRecommendedBlogUiState
 import org.wordpress.android.ui.reader.discover.ReaderNavigationEvents.OpenPost
 import org.wordpress.android.ui.reader.discover.ReaderNavigationEvents.SharePost
 import org.wordpress.android.ui.reader.discover.ReaderNavigationEvents.ShowBlogPreview
@@ -31,6 +33,7 @@ import org.wordpress.android.ui.reader.discover.ReaderNavigationEvents.ShowBookm
 import org.wordpress.android.ui.reader.discover.ReaderNavigationEvents.ShowBookmarkedTab
 import org.wordpress.android.ui.reader.discover.ReaderNavigationEvents.ShowPostDetail
 import org.wordpress.android.ui.reader.discover.ReaderNavigationEvents.ShowReaderComments
+import org.wordpress.android.ui.reader.discover.ReaderNavigationEvents.ShowReportPost
 import org.wordpress.android.ui.reader.discover.ReaderNavigationEvents.ShowVideoViewer
 import org.wordpress.android.ui.reader.discover.ReaderPostCardActionType.BLOCK_SITE
 import org.wordpress.android.ui.reader.discover.ReaderPostCardActionType.BOOKMARK
@@ -38,6 +41,7 @@ import org.wordpress.android.ui.reader.discover.ReaderPostCardActionType.COMMENT
 import org.wordpress.android.ui.reader.discover.ReaderPostCardActionType.FOLLOW
 import org.wordpress.android.ui.reader.discover.ReaderPostCardActionType.LIKE
 import org.wordpress.android.ui.reader.discover.ReaderPostCardActionType.REBLOG
+import org.wordpress.android.ui.reader.discover.ReaderPostCardActionType.REPORT_POST
 import org.wordpress.android.ui.reader.discover.ReaderPostCardActionType.SHARE
 import org.wordpress.android.ui.reader.discover.ReaderPostCardActionType.SITE_NOTIFICATIONS
 import org.wordpress.android.ui.reader.discover.ReaderPostCardActionType.VISIT_SITE
@@ -52,7 +56,7 @@ import org.wordpress.android.ui.reader.usecases.BookmarkPostState.Success
 import org.wordpress.android.ui.reader.usecases.ReaderPostBookmarkUseCase
 import org.wordpress.android.ui.reader.usecases.ReaderSiteFollowUseCase
 import org.wordpress.android.ui.reader.usecases.ReaderSiteFollowUseCase.FollowSiteState
-import org.wordpress.android.ui.reader.usecases.ReaderSiteFollowUseCase.FollowSiteState.PostFollowStatusChanged
+import org.wordpress.android.ui.reader.usecases.ReaderSiteFollowUseCase.FollowSiteState.FollowStatusChanged
 import org.wordpress.android.ui.reader.usecases.ReaderSiteNotificationsUseCase
 import org.wordpress.android.ui.reader.usecases.ReaderSiteNotificationsUseCase.SiteNotificationState
 import org.wordpress.android.ui.utils.HtmlMessageUtils
@@ -92,8 +96,8 @@ class ReaderPostCardActionsHandler @Inject constructor(
     private val _preloadPostEvents = MediatorLiveData<Event<PreLoadPostContent>>()
     val preloadPostEvents: LiveData<Event<PreLoadPostContent>> = _preloadPostEvents
 
-    private val _followStatusUpdated = MediatorLiveData<PostFollowStatusChanged>()
-    val followStatusUpdated: LiveData<PostFollowStatusChanged> = _followStatusUpdated
+    private val _followStatusUpdated = MediatorLiveData<FollowStatusChanged>()
+    val followStatusUpdated: LiveData<FollowStatusChanged> = _followStatusUpdated
 
     // Used only in legacy ReaderPostListFragment. The discover tab observes reactive ReaderDiscoverDataProvider.
     private val _refreshPosts = MediatorLiveData<Event<Unit>>()
@@ -115,6 +119,7 @@ class ReaderPostCardActionsHandler @Inject constructor(
                 BOOKMARK -> handleBookmarkClicked(post.postId, post.blogId, isBookmarkList)
                 REBLOG -> handleReblogClicked(post)
                 COMMENTS -> handleCommentsClicked(post.postId, post.blogId)
+                REPORT_POST -> handleReportPostClicked(post)
             }
         }
     }
@@ -142,8 +147,32 @@ class ReaderPostCardActionsHandler @Inject constructor(
         }
     }
 
+    suspend fun handleReportPostClicked(post: ReaderPost) {
+        withContext(bgDispatcher) {
+            val properties: MutableMap<String, Any> = HashMap()
+            properties["blog_id"] = post.blogId
+            properties["is_jetpack"] = post.isJetpack
+            properties["post_id"] = post.postId
+            analyticsTrackerWrapper.track(READER_POST_REPORTED, properties)
+            _navigationEvents.postValue(Event(ShowReportPost(post.blogUrl)))
+        }
+    }
+
+    suspend fun handleFollowRecommendedSiteClicked(recommendedBlogUiState: ReaderRecommendedBlogUiState) {
+        val param = ReaderSiteFollowUseCase.Param(
+                blogId = recommendedBlogUiState.blogId,
+                blogName = recommendedBlogUiState.name,
+                feedId = recommendedBlogUiState.feedId
+        )
+        followSite(param)
+    }
+
     private suspend fun handleFollowClicked(post: ReaderPost) {
-        followUseCase.toggleFollow(post).collect {
+        followSite(ReaderSiteFollowUseCase.Param(post.blogId, post.feedId, post.blogName))
+    }
+
+    private suspend fun followSite(followSiteParam: ReaderSiteFollowUseCase.Param) {
+        followUseCase.toggleFollow(followSiteParam).collect {
             when (it) {
                 is FollowSiteState.Failed.NoNetwork -> {
                     _snackbarEvents.postValue(
@@ -155,14 +184,13 @@ class ReaderPostCardActionsHandler @Inject constructor(
                             Event(SnackbarMessageHolder((UiStringRes(R.string.reader_error_request_failed_title))))
                     )
                 }
-                is FollowSiteState.Success -> { // Do nothing
-                }
-                is PostFollowStatusChanged -> {
+                is FollowSiteState.Success -> Unit // Do nothing
+                is FollowStatusChanged -> {
                     _followStatusUpdated.postValue(it)
                     siteNotificationsUseCase.fetchSubscriptions()
 
                     if (it.showEnableNotification) {
-                        val action = prepareEnableNotificationSnackbarAction(post.blogName, post.blogId)
+                        val action = prepareEnableNotificationSnackbarAction(followSiteParam.blogName, it.blogId)
                         action.invoke()
                     } else if (it.deleteNotificationSubscription) {
                         siteNotificationsUseCase.updateSubscription(it.blogId, DELETE)
@@ -223,8 +251,7 @@ class ReaderPostCardActionsHandler @Inject constructor(
                             )
                     )
                 }
-                BlockSiteState.Success, BlockSiteState.Failed.AlreadyRunning -> {
-                } // do nothing
+                BlockSiteState.Success, BlockSiteState.Failed.AlreadyRunning -> Unit // do nothing
                 BlockSiteState.Failed.NoNetwork -> {
                     _snackbarEvents.postValue(
                             Event(SnackbarMessageHolder(UiStringRes(R.string.reader_toast_err_block_blog)))
@@ -246,7 +273,8 @@ class ReaderPostCardActionsHandler @Inject constructor(
                 is PostLikeState.PostLikedInLocalDb -> {
                     _refreshPosts.postValue(Event(Unit))
                 }
-                is PostLikeState.Success, is PostLikeState.Unchanged, is PostLikeState.AlreadyRunning -> { }
+                is PostLikeState.Success, is PostLikeState.Unchanged, is PostLikeState.AlreadyRunning -> {
+                }
                 is PostLikeState.Failed.NoNetwork -> {
                     _snackbarEvents.postValue(Event(SnackbarMessageHolder(UiStringRes(R.string.no_network_message))))
                 }

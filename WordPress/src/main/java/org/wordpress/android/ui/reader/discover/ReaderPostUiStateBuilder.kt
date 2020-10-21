@@ -3,10 +3,9 @@ package org.wordpress.android.ui.reader.discover
 import dagger.Reusable
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.withContext
-import org.apache.commons.text.StringEscapeUtils
 import org.wordpress.android.R
 import org.wordpress.android.fluxc.store.AccountStore
-import org.wordpress.android.models.ReaderCardRecommendedBlog
+import org.wordpress.android.models.ReaderBlog
 import org.wordpress.android.models.ReaderCardType.DEFAULT
 import org.wordpress.android.models.ReaderCardType.GALLERY
 import org.wordpress.android.models.ReaderCardType.PHOTO
@@ -68,7 +67,6 @@ class ReaderPostUiStateBuilder @Inject constructor(
         photonWidth: Int,
         photonHeight: Int,
         postListType: ReaderPostListType,
-        isBookmarkList: Boolean,
         onButtonClicked: (Long, Long, ReaderPostCardActionType) -> Unit,
         onItemClicked: (Long, Long) -> Unit,
         onItemRendered: (ReaderCardUiState) -> Unit,
@@ -87,7 +85,6 @@ class ReaderPostUiStateBuilder @Inject constructor(
                     photonWidth,
                     photonHeight,
                     postListType,
-                    isBookmarkList,
                     onButtonClicked,
                     onItemClicked,
                     onItemRendered,
@@ -108,7 +105,6 @@ class ReaderPostUiStateBuilder @Inject constructor(
         photonWidth: Int,
         photonHeight: Int,
         postListType: ReaderPostListType,
-        isBookmarkList: Boolean,
         onButtonClicked: (Long, Long, ReaderPostCardActionType) -> Unit,
         onItemClicked: (Long, Long) -> Unit,
         onItemRendered: (ReaderCardUiState) -> Unit,
@@ -143,9 +139,9 @@ class ReaderPostUiStateBuilder @Inject constructor(
                 fullVideoUrl = buildFullVideoUrl(post),
                 discoverSection = buildDiscoverSection(post, onDiscoverSectionClicked),
                 bookmarkAction = buildBookmarkSection(post, onButtonClicked),
-                likeAction = buildLikeSection(post, isBookmarkList, onButtonClicked),
+                likeAction = buildLikeSection(post, onButtonClicked),
                 reblogAction = buildReblogSection(post, onButtonClicked),
-                commentsAction = buildCommentsSection(post, isBookmarkList, onButtonClicked),
+                commentsAction = buildCommentsSection(post, onButtonClicked),
                 onItemClicked = onItemClicked,
                 onItemRendered = onItemRendered,
                 onMoreButtonClicked = onMoreButtonClicked,
@@ -178,18 +174,21 @@ class ReaderPostUiStateBuilder @Inject constructor(
     }
 
     suspend fun mapRecommendedBlogsToReaderRecommendedBlogsCardUiState(
-        recommendedBlogs: List<ReaderCardRecommendedBlog>,
-        onItemClicked: (Long, Long?) -> Unit
+        recommendedBlogs: List<ReaderBlog>,
+        onItemClicked: (Long, Long) -> Unit,
+        onFollowClicked: (ReaderRecommendedBlogUiState) -> Unit
     ): ReaderRecommendedBlogsCardUiState = withContext(bgDispatcher) {
         recommendedBlogs.take(READER_RECOMMENDED_BLOGS_LIST_SIZE_LIMIT)
                 .map {
                     ReaderRecommendedBlogUiState(
-                            name = StringEscapeUtils.unescapeHtml4(it.name),
+                            name = it.name,
                             url = urlUtilsWrapper.removeScheme(it.url),
                             blogId = it.blogId,
                             feedId = it.feedId,
-                            description = StringEscapeUtils.unescapeHtml4(it.description),
-                            iconUrl = it.iconUrl,
+                            description = it.description.ifEmpty { null },
+                            iconUrl = it.imageUrl,
+                            isFollowed = it.isFollowing,
+                            onFollowClicked = onFollowClicked,
                             onItemClicked = onItemClicked
                     )
                 }.let { ReaderRecommendedBlogsCardUiState(it) }
@@ -327,13 +326,9 @@ class ReaderPostUiStateBuilder @Inject constructor(
 
     private fun buildLikeSection(
         post: ReaderPost,
-        isBookmarkList: Boolean,
         onClicked: (Long, Long, ReaderPostCardActionType) -> Unit
     ): PrimaryAction {
-        /* TODO malinjir why we don't show likes on bookmark list??? I think we wanted
-             to keep the card as simple as possible. However, since we are showing all the actions now, some of them
-             are just disabled, I think it's ok to enable the action. */
-        val likesEnabled = !isBookmarkList && post.canLikePost() && accountStore.hasAccessToken()
+        val likesEnabled = post.canLikePost() && accountStore.hasAccessToken()
 
         return PrimaryAction(
                 isEnabled = likesEnabled,
@@ -362,20 +357,15 @@ class ReaderPostUiStateBuilder @Inject constructor(
 
     private fun buildCommentsSection(
         post: ReaderPost,
-        isBookmarkList: Boolean,
         onCommentsClicked: (Long, Long, ReaderPostCardActionType) -> Unit
     ): PrimaryAction {
         val showComments = when {
-            /* TODO malinjir why we don't show comments on bookmark list??? I think we wanted
-                 to keep the card as simple as possible. However, since we are showing all the actions now, some of them
-                 are just disabled, I think it's ok to enable the action. */
-            post.isDiscoverPost || isBookmarkList -> false
+            post.isDiscoverPost -> false
             !accountStore.hasAccessToken() -> post.numReplies > 0
             else -> post.isWP && (post.isCommentsOpen || post.numReplies > 0)
         }
         val contentDescription = UiStringRes(R.string.comments)
 
-        // TODO Add content description
         return if (showComments) {
             PrimaryAction(
                     isEnabled = true,
